@@ -1,0 +1,96 @@
+name: Continuous Persistent VPS (Ubuntu 22.04)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Restart every 6 hours
+  workflow_dispatch:
+
+jobs:
+  vps-session:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      # 1. Checkout repo
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # 2. Download previous backup (if any)
+      - name: Download VPS backup
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: ./backup
+        continue-on-error: true
+
+      # 3. Restore filesystem from backup
+      - name: Restore backup files
+        run: |
+          if [ -f ./backup/backup.zip ]; then
+            echo "Restoring backup..."
+            sudo apt update && sudo apt install -y unzip
+            sudo unzip -o ./backup/backup.zip -d /
+          else
+            echo "No backup found, starting fresh"
+          fi
+
+      # 4. Set hostname
+      - name: Set hostname to nissalnodes
+        run: sudo hostnamectl set-hostname nissalnodes
+
+      # 5. Install prerequisites
+      - name: Install tools
+        run: |
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+
+      # 6. Install Tailscale
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
+
+      # 7. Restore Tailscale state (to keep same IP)
+      - name: Restore Tailscale state
+        run: |
+          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+          fi
+
+      # 8. Start Tailscale
+      - name: Start Tailscale
+        run: |
+          sudo tailscaled &
+          sleep 8
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=nissalnodes || echo "Tailscale already up"
+
+      # 9. Create root user with password
+      - name: Set root password
+        run: echo "root:nissalnodes" | sudo chpasswd
+
+      # 10. Start tmate session for SSH
+      - name: Start tmate session
+        uses: mxschmitt/action-tmate@v3
+
+      # 11. Show Tailscale IP
+      - name: Show Tailscale IP
+        run: tailscale ip -4 || echo "Tailscale IP not found"
+
+      # 12. Keep VPS alive for max time
+      - name: Sleep to keep alive
+        run: sleep 21600  # 6 hours
+
+      # 13. Backup filesystem + Tailscale state
+      - name: Backup VPS data
+        run: |
+          sudo mkdir -p /opt/vps-backup/data
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || true
+          sudo chown -R $USER:$USER /opt/vps-backup
+          zip -r backup.zip /opt/vps-backup
+
+      # 14. Upload backup
+      - name: Upload VPS backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: backup.zip
